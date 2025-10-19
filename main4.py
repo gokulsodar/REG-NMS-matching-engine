@@ -24,15 +24,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-    class OrderType(Enum):
-        MARKET = "market"
-        LIMIT = "limit"
-        IOC = "ioc"  # Immediate-Or-Cancel
-        FOK = "fok"  # Fill-Or-Kill
-        STOP_LOSS = "stop_loss"
-        STOP_LIMIT = "stop_limit"
-        TAKE_PROFIT_MARKET = "take_profit_market"
-        TAKE_PROFIT_LIMIT = "take_profit_limit"
+class OrderType(Enum):
+    MARKET = "market"
+    LIMIT = "limit"
+    IOC = "ioc"  # Immediate-Or-Cancel
+    FOK = "fok"  # Fill-Or-Kill
+    STOP_LOSS = "stop_loss"
+    STOP_LIMIT = "stop_limit"
+    TAKE_PROFIT_MARKET = "take_profit_market"
+    TAKE_PROFIT_LIMIT = "take_profit_limit"
 
 
 class OrderSide(Enum):
