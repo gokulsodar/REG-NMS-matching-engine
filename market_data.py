@@ -22,7 +22,7 @@ async def subscribe_to_market_data(symbol: str):
                     print(f"Received Market Data Update for {symbol}")
                     print("="*50)
 
-                    print(json.dumps(data))
+                    print(json.dumps(data,indent=3))
                     
                     print("="*50 + "\n")
 
