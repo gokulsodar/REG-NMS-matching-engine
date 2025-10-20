@@ -2,7 +2,7 @@
 High-Performance Cryptocurrency Matching Engine
 Implements REG NMS-inspired price-time priority with internal order protection
 """
-########### MULTI THREADING !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
 import uuid
 import time
 from datetime import datetime, timezone
@@ -547,7 +547,10 @@ class MatchingEngine:
 
     async def _broadcast_market_data(self, order_book: OrderBook):
         """Broadcast market data update"""
-        data = order_book.get_depth()
+        data = {
+            'depth': order_book.get_depth(),
+            'bbo': order_book.get_bbo()
+        }
         for callback in self.market_data_callbacks:
             try:
                 await callback(data)
@@ -787,7 +790,8 @@ async def market_data_feed(websocket: WebSocket, symbol: str):
     logger.info(f"Market data client connected for symbol: {symbol}")
     market_data_clients[symbol].append(websocket)
     try:
-        await websocket.send_json(engine.get_order_book_depth(symbol))
+        order_book = engine.get_or_create_order_book(symbol)
+        await websocket.send_json(order_book.get_depth())
         while True:
             await websocket.receive_text()
     except Exception as e:
@@ -830,8 +834,6 @@ async def broadcast_market_data_update(market_data: dict):
                 disconnected_clients.append(client)
         for client in disconnected_clients:
             market_data_clients[symbol].remove(client)
-
-
 # --- Main Application Runner ---
 
 if __name__ == "__main__":
