@@ -1,188 +1,229 @@
-# REG NMS-Inspired Crypto Matching Engine
+# High-Performance Cryptocurrency Matching Engine Documentation
 
 ## Overview
 
-This project implements a high-performance cryptocurrency matching engine inspired by REG NMS principles, focusing on price-time priority and internal order protection. The engine is built in Python and generates its own stream of trade execution data. It supports core order types (Market, Limit, IOC, FOK) and bonus advanced order types (Stop-Loss, Stop-Limit, Take-Profit). The system uses asynchronous programming for efficiency and includes APIs for order submission, market data dissemination, and trade execution feeds.
+This matching engine is a high-performance, REG NMS-inspired system designed for cryptocurrency trading. It implements price-time priority with internal order protection, ensuring fair and efficient order matching. The engine supports various order types, including market, limit, IOC (Immediate-Or-Cancel), FOK (Fill-Or-Kill), stop-loss, stop-limit, take-profit market, and take-profit limit orders.
 
-Key inspirations from REG NMS:
-- Strict price-time priority (FIFO at each price level).
-- Prevention of internal trade-throughs: Marketable orders are filled at the best available internal prices without skipping better levels.
-- Real-time BBO (Best Bid and Offer) calculation and dissemination.
+Key principles inspired by REG NMS (Regulation National Market System):
+- **Price-Time Priority**: Orders are matched based on price first, then time of arrival (FIFO within price levels).
+- **Internal Order Protection**: Prevents trade-throughs by matching against the best available prices in the order book.
+- **No Multi-Threading Due to Dependencies**: Multi-threading was attempted but not implemented due to compatibility issues with FastAPI libraries in Python 3.13, 3.14 (no-GIL version), and 3.15. Instead, asynchronous programming with `asyncio` is used for handling concurrent operations, such as broadcasting trades and market data.
+- **Data Structures for Efficiency**:
+  - **Doubly Linked List (DLL) with Hash Map**: Used at each price level for O(1) time complexity in order additions and removals while maintaining time priority.
+  - **SortedDict**: From the `sortedcontainers` library, used for bids (descending order) and asks (ascending order) to efficiently manage price levels.
 
-The engine is designed for high performance, handling significant order volumes, with robust error handling, logging, and unit tests.
+The engine is built using FastAPI for the API layer, with WebSocket support for real-time feeds. It includes persistence via JSON state files, logging, and fee calculations (maker: 0.1%, taker: 0.2%).
+
+### Project Structure
+
+The project consists of the following files:
+
+```
+.
+├── custom_order.py         # Script for submitting personalized orders to the /order endpoint
+├── dashboard.py            # Visual dashboard for viewing trade feeds (requires Tkinter: sudo apt install python3-tk)
+├── engine.py               # Core matching engine implementation with FastAPI server
+├── market_data_stream.py   # Client script to stream market data from WebSocket endpoint
+├── order_bot.py            # Bot script that infinitely submits random orders
+├── requirements.txt        # List of Python dependencies
+├── test_engine.py          # Pytest-based tests for endpoints and order types
+└── trade_data_stream.py    # Client script to stream trade data from WebSocket endpoint
+```
 
 ## Features
 
-### Core Matching Engine Logic
-- **BBO Calculation and Dissemination**: Maintains real-time BBO for each trading pair (e.g., "BTC-USDT"). Updated instantly on order additions, modifications, cancellations, or matches.
-- **Internal Order Protection & Price-Time Priority**:
-  - Price priority: Better prices (higher bids, lower offers) are filled first.
-  - Time priority: FIFO within the same price level.
-  - No internal trade-throughs: Partial fills at better prices before moving to worse levels.
-- **Order Type Handling**:
-  - **Market Order**: Executes immediately at the best available price(s).
-  - **Limit Order**: Executes at specified price or better; rests on the book if not marketable.
-  - **Immediate-Or-Cancel (IOC)**: Executes partially or fully immediately; cancels unfilled portion without trading through BBO.
-  - **Fill-Or-Kill (FOK)**: Executes fully immediately or cancels entirely without trading through BBO.
+- **Order Types Supported**:
+  - Market: Executes immediately at the best available price.
+  - Limit: Executes at a specified price or better; rests on the book if not fully filled.
+  - IOC: Fills immediately or cancels the remainder.
+  - FOK: Fills entirely or cancels if not possible.
+  - Stop-Loss: Triggers a market/limit sell (or buy) when price hits or crosses the stop price.
+  - Stop-Limit: Triggers a limit order when stop price is hit.
+  - Take-Profit Market: Triggers a market order when profit target is reached.
+  - Take-Profit Limit: Triggers a limit order when profit target is reached.
 
-### Data Generation & APIs
-- **Order Submission API**: REST/WebSocket endpoint for submitting orders.
-  - Parameters: `symbol` (e.g., "BTC-USDT"), `order_type` ("market", "limit", "ioc", "fok"), `side` ("buy", "sell"), `quantity` (decimal), `price` (decimal, for limit orders).
-- **Market Data Dissemination API**: WebSocket stream for real-time data.
-  - Includes: Current BBO, order book depth (top 10 bid/ask levels).
-  - Sample L2 Update:
-    ```json
-    {
-      "timestamp": "YYYY-MM-DDTHH:MM:SS.ssssssZ",
-      "symbol": "BTC-USDT",
-      "asks": [["price_level", "quantity_at_price_level"], ...],
-      "bids": [["price_level", "quantity_at_price_level"], ...]
-    }
-    ```
-- **Trade Execution Data Generation & API**: WebSocket stream for trade fills.
-  - Generates execution reports as trades occur.
-  - Sample Trade Report:
-    ```json
-    {
-      "timestamp": "YYYY-MM-DDTHH:MM:SS.ssssssZ",
-      "symbol": "BTC-USDT",
-      "trade_id": "unique_trade_identifier",
-      "price": "execution_price",
-      "quantity": "executed_quantity",
-      "aggressor_side": "buy/sell",
-      "maker_order_id": "id_of_the_resting_order",
-      "taker_order_id": "id_of_the_incoming_order"
-    }
-    ```
+- **Order Sides**: Buy and Sell.
 
-### Technical Features
-- **Performance**: Targets >1000 orders/sec; uses async programming for concurrency (multi-threading skipped due to FastAPI dependency issues with no-GIL Python 3.13-3.15).
-- **Error Handling**: Validates order parameters; handles invalid inputs gracefully.
-- **Logging**: Comprehensive for diagnostics and audits.
-- **Code Architecture**: Clean, maintainable, well-documented.
-- **Testing**: Unit tests for matching logic and order handling via `test_engine.py`.
+- **Order Statuses**: New, Partially Filled, Filled, Cancelled, Rejected.
 
-### Bonus Features
-- **Advanced Order Types**: Stop-Loss, Stop-Limit, Take-Profit implemented.
-- **Persistence**: Order book state persistence for restart recovery.
-- **Concurrency & Optimization**: Async optimizations; benchmarking for latencies (order processing, BBO updates, trade generation).
-- **Fee Model**: Simple maker-taker fees included in trade reports.
+- **Matching Logic**:
+  - Aggressive matching for marketable orders.
+  - Conditional orders (stop/take-profit) are held until triggered by last trade price.
+  - Fees applied to trades (configurable).
 
-## System Requirements
-- Python 3.12+ (tested on 3.12; no-GIL versions 3.13-3.15 avoided due to FastAPI incompatibilities).
-- Dependencies listed in `requirements.txt` (e.g., FastAPI for APIs, SortedContainers for data structures).
-- For dashboard visualization: `sudo apt install tkinter` (Ubuntu/Debian).
-- Package Manager: uv (faster alternative to pip) for virtual environment setup.
+- **Real-Time Feeds**:
+  - WebSocket for trades (/ws/trades).
+  - WebSocket for market data (order book depth) per symbol (/ws/marketdata/{symbol}).
 
-## Installation
-1. Clone the repository:
+- **Persistence**: Order books and conditional orders saved to `order_book_state.json` on exit and loaded on startup.
+
+- **Reset Functionality**: Clears all state via /reset endpoint.
+
+- **Performance Metrics**: Logs latencies for order processing, trade generation, and BBO (Best Bid/Offer) updates.
+
+- **Testing**: Comprehensive pytest suite in `test_engine.py` covering all endpoints and order types.
+
+## Architecture and Components
+
+### Key Classes
+
+1. **Order** (Dataclass):
+   - Represents a trading order with fields like `order_id`, `symbol`, `order_type`, `side`, `quantity`, `price`, `timestamp`, `status`, etc.
+   - Methods: `to_dict()`, `from_dict()`, properties for remaining quantity.
+
+2. **Trade** (Dataclass):
+   - Represents an executed trade with fields like `trade_id`, `symbol`, `price`, `quantity`, `timestamp`, `aggressor_side`, etc.
+   - Method: `to_dict()`.
+
+3. **Node** (Dataclass):
+   - Node for the doubly linked list in `OrderList`.
+
+4. **OrderList**:
+   - Doubly linked list for orders at a price level.
+   - Supports append (O(1)), remove (O(1) with hash map reference), iteration.
+
+5. **PriceLevel**:
+   - Manages orders at a specific price.
+   - Uses `OrderList` and a hash map (`order_map`) for O(1) removals.
+   - Tracks total quantity at the level.
+
+6. **OrderBook**:
+   - Manages bids and asks for a symbol using `SortedDict`.
+   - Bids: Sorted descending (highest first).
+   - Asks: Sorted ascending (lowest first).
+   - Methods: `add_order()`, `remove_order()`, `get_depth()` (top N levels).
+
+7. **MatchingEngine**:
+   - Core engine managing multiple order books.
+   - Handles order submission, matching, conditional orders, trades.
+   - Broadcasts via callbacks (async).
+   - Persistence: `save_state()`, `load_state()`.
+   - Reset: Clears all data.
+
+### Data Flow
+
+1. Order submitted via API/WebSocket.
+2. Validated and processed asynchronously.
+3. Matched against order book (aggressive or resting).
+4. Trades executed, fees applied, broadcasts sent.
+5. Conditional orders triggered on price changes.
+6. Market data updated on changes.
+
+## API Endpoints
+
+### POST /order
+- **Description**: Submit a new order.
+- **Request Body** (JSON):
+  ```json
+  {
+    "symbol": "BTCUSD",
+    "order_type": "limit",
+    "side": "buy",
+    "quantity": 1.5,
+    "price": 50000.0,  // Required for limit-based types
+    "stop_price": 45000.0  // Required for conditional types
+  }
+  ```
+- **Response**: JSON with status, order_id, filled/remaining quantities, executions.
+- **Validation**: Checks for required fields, positive numbers, etc.
+
+### POST /reset
+- **Description**: Resets the entire engine (clears order books, trades, conditional orders).
+- **Response**: Success or error message.
+
+## WebSocket Endpoints
+
+### /ws/trades
+- **Description**: Real-time feed of all trades.
+- **Message Format**: JSON trade data (from `Trade.to_dict()`).
+
+### /ws/marketdata/{symbol}
+- **Description**: Real-time order book depth for a specific symbol.
+- **Initial Message**: Current depth on connect.
+- **Updates**: JSON with timestamp, symbol, bids/asks (top 10 levels).
+
+## Installation and Running
+
+1. Install dependencies:
    ```
-   git clone <repo-url>
-   cd <repo-dir>
+   pip install -r requirements.txt
    ```
-2. Set up virtual environment with uv:
+   (Includes `fastapi`, `uvicorn`, `sortedcontainers`, `decimal`, etc.)
+
+2. Run the engine:
    ```
-   uv venv
-   source .venv/bin/activate  # On Unix-based systems
-   # Or: .venv\Scripts\activate on Windows
+   python engine.py
    ```
-3. Install dependencies:
+   - Server starts at http://127.0.0.1:8000.
+
+3. For dashboard (optional):
    ```
-   uv pip install -r requirements.txt
+   sudo apt install python3-tk
+   python dashboard.py
    ```
-4. (Optional) For dashboard: Install tkinter via system package manager.
 
-## Usage
-- **Run the Engine**: Start the main engine server.
-  ```
-  python engine.py
-  ```
-  This launches FastAPI-based APIs for order submission, market data, and trade feeds.
+4. Testing:
+   ```
+   pytest test_engine.py
+   ```
 
-- **Submit Custom Orders**: Use `custom_order.py` to send personalized orders to the engine.
-  ```
-  python custom_order.py
-  ```
+## Additional Files and Usage
 
-- **Order Bot**: Simulate continuous order flow.
-  ```
-  python order_bot.py
-  ```
+### custom_order.py
+- **Description**: Script for submitting personalized orders to the /order endpoint. Allows custom JSON payloads for testing specific scenarios.
 
-- **Market Data Stream**: Connect to WebSocket for real-time BBO and order book.
-  ```
-  python market_data_stream.py
-  ```
+**Screenshot Placeholder**:
+![Screenshot of custom_order.py](screenshots/custom_order.png)
 
-- **Trade Data Stream**: Subscribe to trade execution feed.
-  ```
-  python trade_data_stream.py
-  ```
+### dashboard.py
+- **Description**: Visual dashboard using Tkinter to display real-time trade feeds. Connects to /ws/trades and shows trades in a GUI.
 
-- **Dashboard**: Visualize trade feeds (requires tkinter).
-  ```
-  python dashboard.py
-  ```
+**Screenshot Placeholder**:
+![Screenshot of dashboard.py](screenshots/dashboard.png)
 
-- **Testing**: Run unit tests for endpoints and order types.
-  ```
-  pytest test_engine.py
-  ```
+### engine.py
+- **Description**: Core file containing the matching engine, classes, and FastAPI server. This is the main executable.
 
-## Project Structure
-```
-.
-├── custom_order.py       # Script for submitting personalized orders to the engine API.
-├── dashboard.py          # Extra: Visual dashboard for trade feeds (requires tkinter).
-├── engine.py             # Core matching engine implementation with APIs.
-├── market_data_stream.py # Client script to stream market data (BBO, order book) from WebSocket.
-├── order_bot.py          # Bot to generate infinite random orders for simulation.
-├── requirements.txt      # Dependency list (install via uv pip).
-├── test_engine.py        # Unit tests for engine logic, endpoints, and order types.
-└── trade_data_stream.py  # Client script to stream trade execution data from WebSocket.
-```
+**Screenshot Placeholder**:
+![Screenshot of engine.py](screenshots/engine.png)
 
-## Architecture and Design Choices
-- **Language**: Python chosen for rapid development, async support, and ecosystem (e.g., FastAPI, WebSockets).
-- **Concurrency**: Asynchronous programming with `asyncio` for handling high-volume orders and streams. Multi-threading avoided due to FastAPI incompatibilities with no-GIL Python versions (3.13-3.15 tested).
-- **API Framework**: FastAPI for REST/WebSocket endpoints – efficient, type-safe, and auto-documented.
-- **Data Structures**:
-  - **Order Book**: `SortedDict` (from `sortedcontainers`) for bids (descending) and asks (ascending) to maintain sorted price levels efficiently.
-  - **Price Levels**: Each level uses a doubly linked list with hash map for O(1) operations on order insertion/deletion (time priority FIFO).
-  - Rationale: Combines sorted access for price priority with fast FIFO for time priority; efficient for frequent updates in high-frequency trading.
-- **Matching Algorithm**:
-  - Incoming orders check against opposite side book.
-  - Traverse price levels in priority order, filling at best prices first.
-  - Partial fills handled iteratively until order is satisfied or book exhausted.
-  - IOC/FOK: Check fillability upfront; cancel if conditions unmet.
-  - Trade-through prevention: Always exhaust better price levels before worse ones.
-- **Trade-Offs**:
-  - Async over threads: Better for I/O-bound tasks (APIs, streams); avoids GIL issues.
-  - No external databases: In-memory for speed; persistence via simple file dumps for recovery.
-  - Performance: Prioritized low-latency matching over complex features; benchmarks show sub-ms latencies for core operations.
+### market_data_stream.py
+- **Description**: Client script to connect to /ws/marketdata/{symbol} and print real-time market data updates.
 
-## API Specifications
-- **Order Submission**: POST `/orders` (REST) or WebSocket.
-- **Market Data**: WebSocket at `/ws/market`.
-- **Trade Data**: WebSocket at `/ws/trades`.
-- Full Swagger docs auto-generated by FastAPI (access at `/docs` when running `engine.py`).
+**Screenshot Placeholder**:
+![Screenshot of market_data_stream.py](screenshots/market_data_stream.png)
 
-## Testing
-- `test_engine.py` covers:
-  - Each order type (core and bonus).
-  - API endpoints.
-  - Matching logic (price-time priority, no trade-throughs).
-  - Edge cases (invalid params, partial fills).
-- Run with: `pytest test_engine.py`.
+### order_bot.py
+- **Description**: Bot that infinitely submits random orders to the /order endpoint for load testing or simulation.
 
-## Limitations
-- No multi-threading: Relied on async due to library dependencies.
-- Single-symbol focus: Extensible to multi-symbol but demo uses "BTC-USDT".
-- No production hardening: Lacks full security (e.g., auth) or distributed scaling.
+**Screenshot Placeholder**:
+![Screenshot of order_bot.py](screenshots/order_bot.png)
 
-## Deliverables
-- **Source Code**: Complete in this repo with inline docs.
-- **Documentation**: This README.md; code comments for details.
-- **Demo Video**: (Not included here; record submitting orders, viewing streams/dashboard, code walkthrough).
+### requirements.txt
+- **Description**: List of Python packages required (e.g., fastapi, uvicorn, sortedcontainers, etc.).
 
-For questions or contributions, open an issue!
+**Screenshot Placeholder**:
+![Screenshot of requirements.txt](screenshots/requirements.png)
+
+### test_engine.py
+- **Description**: Pytest suite testing all endpoints (/order, /reset) and order types. Run with `pytest test_engine.py`.
+
+**Screenshot Placeholder**:
+![Screenshot of test_engine.py](screenshots/test_engine.png)
+
+### trade_data_stream.py
+- **Description**: Client script to connect to /ws/trades and print real-time trade executions.
+
+**Screenshot Placeholder**:
+![Screenshot of trade_data_stream.py](screenshots/trade_data_stream.png)
+
+## Limitations and Future Improvements
+
+- **No Multi-Threading**: Relies on async for concurrency; could explore alternative libraries for true parallelism.
+- **Security**: No authentication; add JWT or API keys for production.
+- **Scalability**: Single-instance; consider clustering for high volume.
+- **Error Handling**: Basic; enhance with more granular exceptions.
+- **Monitoring**: Integrate Prometheus/Grafana for metrics.
+
+## License
+This project is open-source under the MIT License (assumed; adjust as needed).
