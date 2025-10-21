@@ -130,47 +130,43 @@ class TestMatchingEngineLogic:
         
         async with websockets.connect(TRADES_WS_URL) as trade_ws, \
              websockets.connect(MARKET_DATA_WS_URL_TEMPLATE.format(symbol=symbol)) as md_ws:
-
-            # # 1. Consume the initial empty depth snapshot sent on connection.
-            # initial_depth = await listen_for_message(md_ws)
-            # assert initial_depth['bids'] == []
             
-            # 2. Place first order (highest price, first in time).
+            # 1. Place first order (highest price, first in time).
             order1 = {'symbol': symbol, 'order_type': 'limit', 'side': 'buy', 'quantity': 1.0, 'price': 3000}
             res1 = post_order(order1)
             assert res1.status_code == 200
             order1_id = res1.json()['order_id']
 
-            # 3. Place second order (lower price).
+            # 2. Place second order (lower price).
             order2 = {'symbol': symbol, 'order_type': 'limit', 'side': 'buy', 'quantity': 0.5, 'price': 2999}
             post_order(order2)
 
-            # 4. Place third order (same price as first, second in time).
+            # 3. Place third order (same price as first, second in time).
             order3 = {'symbol': symbol, 'order_type': 'limit', 'side': 'buy', 'quantity': 0.7, 'price': 3000}
             res3 = post_order(order3)
             assert res3.status_code == 200
             order3_id = res3.json()['order_id']
             
-            # 5. Listen for the 3 market data updates pushed by the server. The last one contains the final book state.
-            depth_updates = await listen_for_message(md_ws, expected_count=3)
+            # 4. Listen for the 3 market data updates pushed by the server. The last one contains the final book state.
+            depth_updates = await listen_for_message(md_ws, expected_count=4)
             final_depth_before_match = depth_updates[-1]
             
-            # 6. Verify the book state: bids should be sorted by price (desc), and quantities aggregated.
+            # 5. Verify the book state: bids should be sorted by price (desc), and quantities aggregated.
             assert Decimal(final_depth_before_match['bids'][0][0]) == Decimal('3000')
             assert Decimal(final_depth_before_match['bids'][0][1]) == Decimal('1.0') + Decimal('0.7')
             assert Decimal(final_depth_before_match['bids'][1][0]) == Decimal('2999')
 
-            # 7. Place a taker sell order to test priority.
+            # 6. Place a taker sell order to test priority.
             taker_order = {'symbol': symbol, 'order_type': 'limit', 'side': 'sell', 'quantity': 1.5, 'price': 3000}
             taker_res = post_order(taker_order)
             assert taker_res.status_code == 200
             assert len(taker_res.json()['executions']) == 2
 
-            # 8. Listen for two trade executions on the trade feed.
+            # 7. Listen for two trade executions on the trade feed.
             trades = await listen_for_message(trade_ws, expected_count=2)
             trades.sort(key=lambda x: x['timestamp']) # Sort by timestamp to ensure chronological order.
 
-            # 9. Verify trades: first trade matches order1 (time priority), second trade partially matches order3.
+            # 8. Verify trades: first trade matches order1 (time priority), second trade partially matches order3.
             assert Decimal(trades[0]['quantity']) == Decimal('1.0')
             assert trades[0]['maker_order_id'] == order1_id
             
@@ -360,27 +356,24 @@ class TestWebSocketFeeds:
             assert Decimal(trade_msg['price']) == Decimal('0.15')
             assert Decimal(trade_msg['quantity']) == Decimal('500')
 
-    # async def test_market_data_feed_and_updates(self):
-    #     """Verify initial depth and subsequent pushed updates are correct."""
-    #     symbol = "MATIC-USDT"
-    #     async with websockets.connect(MARKET_DATA_WS_URL_TEMPLATE.format(symbol=symbol)) as ws:
+    async def test_market_data_feed_and_updates(self):
+        """Verify initial depth and subsequent pushed updates are correct."""
+        symbol = "MATIC-USDT"
+        async with websockets.connect(MARKET_DATA_WS_URL_TEMPLATE.format(symbol=symbol)) as ws:
             
-    #         # 1. Add an order and listen for the pushed update.
-    #         post_order({'symbol': symbol, 'order_type': 'limit', 'side': 'buy', 'quantity': 100, 'price': 0.75})
-    #         depth_update1 = await listen_for_message(ws, expected_count=1)
-    #         print("-------------------------\n\n\n\n\n\n\n\n\n------------------")
-    #         print(depth_update1)
-    #         print("-------------------------\n\n\n\n\n\n\n\n\n------------------")
-    #         assert Decimal(depth_update1['bids'][0][0]) == Decimal('0.75')
-    #         assert Decimal(depth_update1['bids'][0][1]) == Decimal('100')
+            # 1. Add an order and listen for the pushed update.
+            post_order({'symbol': symbol, 'order_type': 'limit', 'side': 'buy', 'quantity': 100, 'price': 0.75})
+            depth_update1 = await listen_for_message(ws, expected_count=2)
+            assert Decimal(depth_update1[1]['bids'][0][0]) == Decimal('0.75')
+            assert Decimal(depth_update1[1]['bids'][0][1]) == Decimal('100')
 
-    #         # 2. Add another order at the same level and check for quantity aggregation in the new update.
-    #         post_order({'symbol': symbol, 'order_type': 'limit', 'side': 'buy', 'quantity': 50, 'price': 0.75})
-    #         depth_update2 = await listen_for_message(ws)
-    #         assert Decimal(depth_update2['bids'][0][0]) == Decimal('0.75')
-    #         assert Decimal(depth_update2['bids'][0][1]) == Decimal('150')
+            # 2. Add another order at the same level and check for quantity aggregation in the new update.
+            post_order({'symbol': symbol, 'order_type': 'limit', 'side': 'buy', 'quantity': 50, 'price': 0.75})
+            depth_update2 = await listen_for_message(ws)
+            assert Decimal(depth_update2['bids'][0][0]) == Decimal('0.75')
+            assert Decimal(depth_update2['bids'][0][1]) == Decimal('150')
 
-    #         # 3. Match the entire level and check that the book is empty again.
-    #         post_order({'symbol': symbol, 'order_type': 'market', 'side': 'sell', 'quantity': 150})
-    #         depth_update3 = await listen_for_message(ws)
-    #         assert depth_update3['bids'] == []
+            # 3. Match the entire level and check that the book is empty again.
+            post_order({'symbol': symbol, 'order_type': 'market', 'side': 'sell', 'quantity': 150})
+            depth_update3 = await listen_for_message(ws)
+            assert depth_update3['bids'] == []

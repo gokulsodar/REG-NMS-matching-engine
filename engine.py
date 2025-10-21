@@ -13,8 +13,14 @@ from decimal import Decimal
 import logging
 import json
 from enum import Enum
-import heapq
 import os
+from sortedcontainers import SortedDict
+import asyncio
+from fastapi import FastAPI, WebSocket, Request
+from fastapi.responses import JSONResponse
+import uvicorn
+import atexit
+
 
 # Configure logging
 logging.basicConfig(
@@ -125,26 +131,80 @@ class Trade:
         }
 
 
+from typing import Optional
+from collections.abc import Iterator
+
+@dataclass
+class Node:
+    """Represents a node in the doubly linked list"""
+    order: 'Order'
+    prev: Optional['Node'] = None
+    next: Optional['Node'] = None
+
+class OrderList:
+    """A doubly linked list implementation for orders"""
+    def __init__(self):
+        self.head: Optional[Node] = None
+        self.tail: Optional[Node] = None
+        self._size: int = 0
+    
+    def append(self, order: 'Order') -> Node:
+        node = Node(order)
+        if not self.head:
+            self.head = self.tail = node
+        else:
+            node.prev = self.tail
+            self.tail.next = node
+            self.tail = node
+        self._size += 1
+        return node
+    
+    def remove_node(self, node: Node):
+        if node.prev:
+            node.prev.next = node.next
+        else:
+            self.head = node.next
+            
+        if node.next:
+            node.next.prev = node.prev
+        else:
+            self.tail = node.prev
+        
+        self._size -= 1
+    
+    def __len__(self) -> int:
+        return self._size
+    
+    def __iter__(self) -> Iterator[Order]:
+        current = self.head
+        while current:
+            yield current.order
+            current = current.next
+
 class PriceLevel:
-    """Represents orders at a specific price level with FIFO queue"""
+    """Represents orders at a specific price level with DLL and hash map"""
     def __init__(self, price: Decimal):
         self.price = price
-        self.orders: deque[Order] = deque()
+        self.orders = OrderList()
+        self.order_map: dict[str, Node] = {}
         self.total_quantity = Decimal('0')
 
     def add_order(self, order: Order):
         """Add order to this price level"""
-        self.orders.append(order)
+        node = self.orders.append(order)
+        self.order_map[order.order_id] = node
         self.total_quantity += order.remaining_quantity
 
     def remove_order(self, order_id: str) -> bool:
-        """Remove order from this price level"""
-        for i, order in enumerate(self.orders):
-            if order.order_id == order_id:
-                self.total_quantity -= order.remaining_quantity
-                del self.orders[i]
-                return True
-        return False
+        """Remove order from this price level - O(1) complexity"""
+        if order_id not in self.order_map:
+            return False
+            
+        node = self.order_map[order_id]
+        self.total_quantity -= node.order.remaining_quantity
+        self.orders.remove_node(node)
+        del self.order_map[order_id]
+        return True
 
     def is_empty(self) -> bool:
         return len(self.orders) == 0
@@ -154,10 +214,8 @@ class OrderBook:
     """Order book for a single trading pair with price-time priority"""
     def __init__(self, symbol: str):
         self.symbol = symbol
-        self.bids: Dict[Decimal, PriceLevel] = {}
-        self.bid_prices: List[Decimal] = []
-        self.asks: Dict[Decimal, PriceLevel] = {}
-        self.ask_prices: List[Decimal] = []
+        self.bids = SortedDict()  # Sorted in descending order for bids, default - ascending
+        self.asks = SortedDict()  # Sorted in ascending order for asks, default - ascending
         self.orders: Dict[str, Order] = {}
 
     def add_order(self, order: Order):
@@ -165,15 +223,13 @@ class OrderBook:
         if order.side == OrderSide.BUY:
             if order.price not in self.bids:
                 self.bids[order.price] = PriceLevel(order.price)
-                heapq.heappush(self.bid_prices, -order.price)
             self.bids[order.price].add_order(order)
         else:
             if order.price not in self.asks:
                 self.asks[order.price] = PriceLevel(order.price)
-                heapq.heappush(self.ask_prices, order.price)
             self.asks[order.price].add_order(order)
         self.orders[order.order_id] = order
-        logger.info(f"Added {order.side.value} order {order.order_id} at {order.price}")
+        logger.info(f"Added {order.symbol} {order.side.value} {order.order_type.value} order {order.order_id} at price: {order.price} for quantity: {order.remaining_quantity}")
 
     def remove_order(self, order_id: str) -> bool:
         """Remove order from the book"""
@@ -191,60 +247,36 @@ class OrderBook:
                 if self.asks[order.price].is_empty():
                     del self.asks[order.price]
         del self.orders[order_id]
-        logger.info(f"Removed order {order_id}")
+        logger.info(f"Removed order {order.symbol} {order_id}")
         return True
-
-    def get_best_bid(self) -> Optional[Tuple[Decimal, Decimal]]:
-        """Get best bid (highest buy price)"""
-        while self.bid_prices and -self.bid_prices[0] not in self.bids:
-            heapq.heappop(self.bid_prices)
-        if self.bid_prices:
-            price = -self.bid_prices[0]
-            return (price, self.bids[price].total_quantity)
-        return None
-
-    def get_best_ask(self) -> Optional[Tuple[Decimal, Decimal]]:
-        """Get best ask (lowest sell price)"""
-        while self.ask_prices and self.ask_prices[0] not in self.asks:
-            heapq.heappop(self.ask_prices)
-        if self.ask_prices:
-            price = self.ask_prices[0]
-            return (price, self.asks[price].total_quantity)
-        return None
-
-    def get_bbo(self) -> Dict:
-        """Get Best Bid and Offer"""
-        bbo_update_start = time.perf_counter()
-        best_bid = self.get_best_bid()
-        best_ask = self.get_best_ask()
-        bbo_update_latency = (time.perf_counter() - bbo_update_start) * 1000
-        logger.info(f"BBO update latency for {self.symbol}: {bbo_update_latency:.4f} ms")
-        return {
-            'symbol': self.symbol,
-            'bid': [str(best_bid[0]), str(best_bid[1])] if best_bid else None,
-            'ask': [str(best_ask[0]), str(best_ask[1])] if best_ask else None,
-            'timestamp': datetime.now(timezone.utc).isoformat()
-        }
-
+    
     def get_depth(self, levels: int = 10) -> Dict:
         """Get order book depth"""
+        start_time = time.time()
+        
         bids = []
         asks = []
-        sorted_bids = sorted(self.bids.keys(), reverse=True)[:levels]
-        for price in sorted_bids:
+        
+        # Get top N bids (highest prices)
+        for price in list(self.bids.keys())[:levels]:
             level = self.bids[price]
-            bids.append([str(price), str(level.total_quantity)])
-        sorted_asks = sorted(self.asks.keys())[:levels]
-        for price in sorted_asks:
+            bids.insert(0, [str(price), str(level.total_quantity)])
+            
+        # Get top N asks (lowest prices)
+        for price in list(self.asks.keys())[:levels]:
             level = self.asks[price]
             asks.append([str(price), str(level.total_quantity)])
+
+        elapsed_time = time.time() - start_time
+        logging.info(f"BBO update latency: {elapsed_time*1000:.4f} ms")
+        
         return {
             'timestamp': datetime.now(timezone.utc).isoformat(),
             'symbol': self.symbol,
             'bids': bids,
             'asks': asks
         }
-import asyncio
+    
 
 class MatchingEngine:
     """Core matching engine with REG NMS-inspired principles"""
@@ -304,7 +336,7 @@ class MatchingEngine:
                 stop_price=stop_price_decimal
             )
 
-            logger.info(f"Received {order_type} {side} order: {order.order_id}")
+            logger.info(f"Received {symbol} {side} {order_type} order {order.order_id} at price: {price_decimal} for quantity: {str(qty)}")
             
             # Pass the validated and created order to the processing logic
             result = self._process_order(order)
@@ -315,8 +347,6 @@ class MatchingEngine:
             return result
         
         except Exception as e:
-            # This catch block now handles unexpected errors during order creation or processing,
-            # not input validation errors which are handled by the API.
             logger.error(f"Error processing order: {e}", exc_info=True)
             return {'status': 'error', 'reason': 'An internal error occurred during order processing.'}
 
@@ -351,7 +381,7 @@ class MatchingEngine:
         trades = self._match_aggressive_order(order, order_book, allow_partial=True)
         if order.remaining_quantity > 0:
             order.status = OrderStatus.CANCELLED
-            logger.warning(f"Market order {order.order_id} partially filled, cancelling remaining {order.remaining_quantity}")
+            logger.warning(f"Market order {order.order_id} partially filled, cancelling remaining quantity: {order.remaining_quantity}")
         else:
             order.status = OrderStatus.FILLED
         return trades
@@ -361,7 +391,7 @@ class MatchingEngine:
         trades = self._match_aggressive_order(order, order_book, allow_partial=True)
         if order.remaining_quantity > 0:
             order.status = OrderStatus.CANCELLED
-            logger.info(f"IOC order {order.order_id} partially filled, cancelling remaining {order.remaining_quantity}")
+            logger.info(f"IOC order {order.order_id} partially filled, cancelling remaining quantity: {order.remaining_quantity}")
         else:
             order.status = OrderStatus.FILLED
         return trades
@@ -382,61 +412,68 @@ class MatchingEngine:
         if order.remaining_quantity > 0:
             order_book.add_order(order)
             order.status = OrderStatus.PARTIALLY_FILLED if order.filled_quantity > 0 else OrderStatus.NEW
-            logger.info(f"Limit order {order.order_id} resting on book with {order.remaining_quantity} remaining")
+            logger.info(f"Limit order {order.order_id} resting on book with remaining quanity: {order.remaining_quantity}")
         else:
             order.status = OrderStatus.FILLED
         return trades
 
     def _match_aggressive_order(self, order: Order, order_book: OrderBook, allow_partial: bool) -> List[Trade]:
-        """Match an aggressive (marketable) order against the book"""
+        """
+        Match an aggressive (marketable) order against the book.
+        """
         trades = []
         while order.remaining_quantity > 0:
             if order.side == OrderSide.BUY:
-                best_level = order_book.get_best_ask()
-                price_levels = order_book.asks
-            else:
-                best_level = order_book.get_best_bid()
-                price_levels = order_book.bids
-            if not best_level:
-                break
-            best_price, _ = best_level
-            if order.price is not None:
-                if order.side == OrderSide.BUY and best_price > order.price:
+                if not order_book.asks:
                     break
-                if order.side == OrderSide.SELL and best_price < order.price:
+                best_price = order_book.asks.peekitem(0)[0]
+                if order.price is not None and best_price > order.price:
                     break
-            level = price_levels[best_price]
-            while level.orders and order.remaining_quantity > 0:
-                maker_order = level.orders[0]
+                level = order_book.asks[best_price]
+            else: # SELL side
+                if not order_book.bids:
+                    break
+                best_price = order_book.bids.peekitem(-1)[0]
+                if order.price is not None and best_price < order.price:
+                    break
+                level = order_book.bids[best_price]
+
+            # Iterate through orders at the best price level (FIFO)
+            while len(level.orders) > 0 and order.remaining_quantity > 0:
+                # Get the first order from the linked list at this price level
+                maker_order = level.orders.head.order
+                
                 fill_qty = min(order.remaining_quantity, maker_order.remaining_quantity)
                 trade = self._execute_trade(order, maker_order, best_price, fill_qty)
                 trades.append(trade)
+
+                # Update quantities on orders and the price level
                 order.filled_quantity += fill_qty
                 maker_order.filled_quantity += fill_qty
+                level.total_quantity -= fill_qty
+
                 if maker_order.remaining_quantity == 0:
                     maker_order.status = OrderStatus.FILLED
-                    level.orders.popleft()
-                    level.total_quantity -= fill_qty
-                    del order_book.orders[maker_order.order_id]
+                    order_book.remove_order(maker_order.order_id)
                     logger.info(f"Maker order {maker_order.order_id} fully filled")
-                else:
-                    level.total_quantity -= fill_qty
-            if level.is_empty():
-                del price_levels[best_price]
         return trades
 
     def _can_fill_quantity(self, order: Order, order_book: OrderBook, quantity: Decimal) -> bool:
-        """Check if quantity can be filled at acceptable prices"""
+        """
+        Check if quantity can be filled at acceptable prices.
+        """
         available = Decimal('0')
         if order.side == OrderSide.BUY:
-            for price in sorted(order_book.asks.keys()):
+            # order_book.asks.keys() is already sorted from low to high price
+            for price in order_book.asks.keys():
                 if order.price is not None and price > order.price:
                     break
                 available += order_book.asks[price].total_quantity
                 if available >= quantity:
                     return True
-        else:
-            for price in sorted(order_book.bids.keys(), reverse=True):
+        else: # SELL side
+            # Use reversed() for bids to go from high to low price
+            for price in reversed(order_book.bids.keys()):
                 if order.price is not None and price < order.price:
                     break
                 available += order_book.bids[price].total_quantity
@@ -462,13 +499,13 @@ class MatchingEngine:
             taker_fee=taker_fee
         )
         self.trades.append(trade)
-        logger.info(f"Trade executed: {trade.trade_id} - {quantity} @ {price}")
+        logger.info(f"Trade executed: {taker.symbol} {trade.trade_id} - {quantity} @ {price}")
         self.last_trade_price[taker.symbol] = price
-        self._check_conditional_orders(taker.symbol, price)
         if trade_clients:
             asyncio.create_task(self._broadcast_trade(trade))
         trade_generation_latency = (time.perf_counter() - trade_start_time) * 1000
         logger.info(f"Trade data generation latency for {trade.trade_id}: {trade_generation_latency:.4f} ms")
+        self._check_conditional_orders(taker.symbol, price)
         return trade
 
     async def _broadcast_trade(self, trade: Trade):
@@ -481,10 +518,7 @@ class MatchingEngine:
 
     async def _broadcast_market_data(self, order_book: OrderBook):
         """Broadcast market data update"""
-        data = {
-            'depth': order_book.get_depth(),
-            'bbo': order_book.get_bbo()
-        }
+        data = order_book.get_depth()
         for callback in self.market_data_callbacks:
             try:
                 await callback(data)
@@ -499,22 +533,10 @@ class MatchingEngine:
         """Subscribe to market data feed"""
         self.market_data_callbacks.append(callback)
 
-    def get_order_book_depth(self, symbol: str, levels: int = 10) -> Dict:
-        """Get current order book depth"""
-        if symbol not in self.order_books:
-            return {'error': 'Symbol not found'}
-        return self.order_books[symbol].get_depth(levels)
-
-    def get_bbo(self, symbol: str) -> Dict:
-        """Get Best Bid and Offer"""
-        if symbol not in self.order_books:
-            return {'error': 'Symbol not found'}
-        return self.order_books[symbol].get_bbo()
-
     def _add_conditional_order(self, order: Order) -> Dict:
         """Add a conditional order to the holding list."""
         self.conditional_orders[order.symbol].append(order)
-        logger.info(f"Accepted conditional {order.order_type.value} order {order.order_id}, waiting for trigger.")
+        logger.info(f"Accepted conditional {order.symbol} {order.side.value} {order.order_type.value} order {order.order_id}, waiting for trigger at {order.stop_price}.")
         return {
             'status': order.status.value,
             'order_id': order.order_id,
@@ -543,7 +565,7 @@ class MatchingEngine:
                 remaining_orders.append(order)
         self.conditional_orders[symbol] = remaining_orders
         for order in triggered_orders:
-            logger.info(f"Triggering conditional order {order.order_id} ({order.order_type.value})")
+            logger.info(f"Triggering conditional order {order.order_id} ({order.side.value} {order.order_type.value})")
             if order.order_type in [OrderType.STOP_LOSS, OrderType.TAKE_PROFIT_MARKET]:
                 order.order_type = OrderType.MARKET
             elif order.order_type in [OrderType.STOP_LIMIT, OrderType.TAKE_PROFIT_LIMIT]:
@@ -586,14 +608,9 @@ class MatchingEngine:
         logger.info(f"Order book state loaded from {self.state_file}")
 
 
-# Add these imports at the top of your file
-from fastapi import FastAPI, WebSocket, Request
-from fastapi.responses import JSONResponse
-import uvicorn
-import atexit
 # --- API and Server Implementation ---
 
-# Create the matching engine instance
+# matching engine instance
 engine = MatchingEngine()
 
 # Register the save_state function to be called on exit
@@ -645,6 +662,7 @@ async def submit_order_api(request: Request):
     """
     REST API endpoint for submitting a new order.
     Expects a JSON payload with order details.
+    Validates input before passing to the matching engine.
     """
     try:
         data = await request.json()
@@ -724,8 +742,8 @@ async def market_data_feed(websocket: WebSocket, symbol: str):
     logger.info(f"Market data client connected for symbol: {symbol}")
     market_data_clients[symbol].append(websocket)
     try:
-        order_book = engine.get_or_create_order_book(symbol)
-        await websocket.send_json(order_book.get_depth())
+        orderbook = engine.get_or_create_order_book(symbol)
+        await websocket.send_json(orderbook.get_depth())
         while True:
             await websocket.receive_text()
     except Exception as e:
@@ -768,20 +786,11 @@ async def broadcast_market_data_update(market_data: dict):
                 disconnected_clients.append(client)
         for client in disconnected_clients:
             market_data_clients[symbol].remove(client)
+
 # --- Main Application Runner ---
 
 if __name__ == "__main__":
     engine.subscribe_trades(broadcast_trade_update)
     engine.subscribe_market_data(broadcast_market_data_update)
-
-    def populate_book():
-        logger.info("Pre-populating order book for BTC-USDT...")
-        engine.submit_order("BTC-USDT", "limit", "buy", 1.5, 50000)
-        engine.submit_order("BTC-USDT", "limit", "buy", 2.0, 49900)
-        engine.submit_order("BTC-USDT", "limit", "sell", 1.0, 50100)
-        engine.submit_order("BTC-USDT", "limit", "sell", 2.5, 50200)
-        logger.info("Order book populated.")
-    import threading
-    threading.Thread(target=populate_book, daemon=True).start()
     logger.info("Starting FastAPI server on http://127.0.0.1:8000")
     uvicorn.run(app, host="127.0.0.1", port=8000)
