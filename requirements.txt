@@ -1,0 +1,7 @@
+fastapi[all]
+requests
+matplotlib
+sortedcontainers
+pytest
+uvicorn
+websockets
