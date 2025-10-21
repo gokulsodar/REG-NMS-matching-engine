@@ -222,8 +222,6 @@ The project consists of the following files:
 - **No Multi-Threading**: Relies on async for concurrency; could explore alternative libraries for true parallelism.
 - **Security**: No authentication; add JWT or API keys for production.
 - **Scalability**: Single-instance; consider clustering for high volume.
-- **Error Handling**: Basic; enhance with more granular exceptions.
-- **Monitoring**: Integrate Prometheus/Grafana for metrics.
 
 ## License
 This project is open-source under the MIT License (assumed; adjust as needed).
