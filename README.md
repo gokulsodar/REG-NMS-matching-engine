@@ -184,6 +184,5 @@ The engine is designed for high performance, handling significant order volumes,
 - **Source Code**: Complete in this repo with inline docs.
 - **Documentation**: This README.md; code comments for details.
 - **Demo Video**: (Not included here; record submitting orders, viewing streams/dashboard, code walkthrough).
-- **Performance Report**: (Bonus) Benchmarks: Order processing ~0.5ms, BBO update ~0.1ms, trade generation ~0.2ms (on standard hardware). Optimizations: Async event loops, efficient data structures.
 
 For questions or contributions, open an issue!
